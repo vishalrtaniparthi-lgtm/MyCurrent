@@ -7,28 +7,33 @@ terraform {
   }
 }
 
+# ─────────────────────────────────────────────────────────────
+# Provider — credentials come from CyberArk at runtime
+# NOTE: insecure = true disables SSL verification.
+#       Replace with a trusted CA cert in production.
+# ─────────────────────────────────────────────────────────────
 provider "nutanix" {
   username = local.nutanix_creds.username
   password = local.nutanix_creds.password
   endpoint = var.nutanix_endpoint
-  insecure = true
+  insecure = false  # Set to true only if your Prism CA cert is not trusted by this machine
 }
 
+# ─────────────────────────────────────────────────────────────
+# External data: CyberArk credential fetch
+# ─────────────────────────────────────────────────────────────
 data "external" "cyberark" {
   program = [
     "powershell",
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
-    "-File", "${path.module}/scripts/CyberArk_getAllCreds.ps1"
+    "-File", "${path.module}/Scripts/CyberFetchallCreds.ps1"
   ]
 }
 
-# locals {
-#   domain_pass_xml = replace(replace(replace(data.external.cyberark.result.domain_admin_password["password"], "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
-#   admin_password_xml = replace(replace(replace(data.external.cyberark.result.local_admin_password["password"], "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
-#   static_ip = data.external.free_ip.result.ip
-# }
-
+# ─────────────────────────────────────────────────────────────
+# Locals: structured credential access + XML-safe escaping
+# ─────────────────────────────────────────────────────────────
 locals {
   nutanix_creds = {
     username = data.external.cyberark.result.nutanix_username
@@ -46,27 +51,17 @@ locals {
     password = data.external.cyberark.result.local_admin_password
   }
 
-  # Escaped for XML
- domain_pass_xml = replace(replace(replace(data.external.cyberark.result.domain_admin_password, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
- admin_password_xml = replace(replace(replace(data.external.cyberark.result.local_admin_password, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
-
-  # Static IP pulled from external script
-  static_ip = data.external.free_ip.result.ip
+  # Escape XML special characters for safe embedding in unattend.xml
+  domain_pass_xml    = replace(replace(replace(local.domain_creds.password, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
+  admin_password_xml = replace(replace(replace(local.local_admin_creds.password, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
 }
 
-data "external" "free_ip" {
-  #program = ["pwsh", "-File", "${path.module}/scripts/fetchfreeip.ps1", "-Quiet"]
-  program = [
-    "powershell",
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-File", "${path.module}/scripts/fetchfreeip_v2.ps1"
-  ]
-}
-
+# ─────────────────────────────────────────────────────────────
+# VM resource — one per entry in var.vm_map
+# ─────────────────────────────────────────────────────────────
 resource "nutanix_virtual_machine" "windows_vm" {
-  # for_each = { for vm in [var.vm_config] : vm.vm_name => vm }
   for_each = var.vm_map
+
   name                 = each.key
   cluster_uuid         = var.cluster_uuid
   num_vcpus_per_socket = each.value.num_vcpus_per_socket
@@ -76,6 +71,7 @@ resource "nutanix_virtual_machine" "windows_vm" {
   boot_device_order_list = ["CDROM", "DISK"]
   use_hot_add          = true
 
+  # OS disk — cloned from golden image
   disk_list {
     disk_size_mib = 102400
     device_properties {
@@ -87,6 +83,7 @@ resource "nutanix_virtual_machine" "windows_vm" {
     }
   }
 
+  # Paging disk — attached as a raw disk, initialized by postboot.ps1
   disk_list {
     disk_size_mib = 0
     device_properties {
@@ -104,27 +101,29 @@ resource "nutanix_virtual_machine" "windows_vm" {
   }
 
   guest_customization_is_overridable = true
- guest_customization_sysprep = {
+
+  guest_customization_sysprep = {
     install_type = "PREPARED"
-    unattend_xml = base64encode(templatefile("${path.module}/SysPrep/unattend_v2.xml", {
-      static_ip      = each.value.static_ip,
-      prefix = each.value.prefix,
-      gateway        = each.value.gateway,
-      dns1           = each.value.dns1,
-      dns2           = each.value.dns2,
-      vm_name        = each.key,
-      domain_name    = var.domain_name,
-      domain_user    = local.domain_creds.username,
-      domain_pass_xml    = local.domain_pass_xml,
+    unattend_xml = base64encode(templatefile("${path.module}/SysPrep/unattend.xml", {
+      static_ip          = each.value.static_ip
+      prefix             = each.value.prefix
+      gateway            = each.value.gateway
+      dns1               = each.value.dns1
+      dns2               = each.value.dns2
+      vm_name            = each.key
+      domain_name        = var.domain_name
+      domain_user        = local.domain_creds.username
+      domain_pass_xml    = local.domain_pass_xml
       admin_password_xml = local.admin_password_xml
-      
     }))
   }
+
+  # Ignore Sysprep and NIC changes after initial creation —
+  # these are one-time setup values that must not trigger replacement.
   lifecycle {
-      ignore_changes = [
+    ignore_changes = [
       guest_customization_sysprep,
       nic_list
     ]
   }
-
 }

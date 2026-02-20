@@ -1,110 +1,121 @@
-# param(
-#   [Parameter(Mandatory = $true)] [string]$VmName
-# )
+<#
+.SYNOPSIS
+    Step 2 of 2 — Apply a previously saved Terraform plan for a VM.
 
-# # Terraform working directory
-# $tfDir        = "C:\Users\vtaniparthi\Git\Terraform\Environment\TCD-Windows"
-# $planFilePath = "$tfDir\tfplan_output_$VmName.tfplan"
+.DESCRIPTION
+    Validates the Terraform repo root, locates the saved .tfplan file created
+    by build_vm_plan_v2.ps1, selects the correct workspace, and runs terraform apply.
 
-# # Ensure plan file exists
-# if (-not (Test-Path $planFilePath)) {
-#   Write-Error "❌ Terraform plan file not found: $planFilePath"
-#   exit 1
-# }
+    Run order:
+        .\Scripts\build_vm_plan_v2.ps1 -VmName "MY-VM-01"   <- run first
+        .\Scripts\build_vm_apply_v2.ps1 -VmName "MY-VM-01"  <- you are here
 
+.PARAMETER VmName
+    Name of the VM to apply. Must match what was used in build_vm_plan_v2.ps1.
+#>
 
-
-# # Switch to directory
-# Set-Location $tfDir
-
-# Write-Host "`n🚀 Running terraform apply for $VmName..."
-# terraform apply "$planFilePath"
-
-# if ($LASTEXITCODE -ne 0) {
-#   Write-Error "❌ Terraform apply failed."
-#   exit 1
-# }
-
-# Write-Host "✅ Terraform apply completed for $VmName"
-
-# ===============================
-# Script parameters (MUST be first)
-# ===============================
+[CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)]
-  [string]$VmName
+    [Parameter(Mandatory)] [string]$VmName
 )
 
-# ===============================
-# Guardrail: Terraform root check
-# ===============================
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# ─────────────────────────────────────────────────────────────
+# Guardrail: confirm Terraform root
+# ─────────────────────────────────────────────────────────────
 function Assert-TerraformRoot {
     param([string]$TerraformRoot)
-
     foreach ($file in @("main.tf", "variables.tf")) {
         if (-not (Test-Path (Join-Path $TerraformRoot $file))) {
             Write-Error @"
- Terraform root validation failed.
+Terraform root validation failed.
 
 Expected '$file' in:
   $TerraformRoot
 
-This script must be run from the Terraform repo root
-(or from the scripts folder inside it).
+Ensure this script lives inside a 'Scripts' subfolder of the Terraform repo root.
 "@
             exit 1
         }
     }
 }
 
-# ===============================
-# Resolve Terraform root (repo root)
-# ===============================
-$tfDir = Resolve-Path (Join-Path $PSScriptRoot "..")
-
-# FAIL FAST if not a Terraform root
-Assert-TerraformRoot -TerraformRoot $tfDir
-
-# ===============================
-# Paths
-# ===============================
-$tfplanDir = Join-Path $tfDir "tfplan"
+# ─────────────────────────────────────────────────────────────
+# Resolve paths
+# ─────────────────────────────────────────────────────────────
+$tfDir        = Resolve-Path (Join-Path $PSScriptRoot "..")
+$tfplanDir    = Join-Path $tfDir "tfplan"
 $planFilePath = Join-Path $tfplanDir "tfplan_output_${VmName}.tfplan"
 
-# Ensure plan file exists
+Assert-TerraformRoot -TerraformRoot $tfDir
+
+# ─────────────────────────────────────────────────────────────
+# Validate plan file exists
+# ─────────────────────────────────────────────────────────────
 if (-not (Test-Path $planFilePath)) {
-    Write-Error "Terraform plan file not found: $planFilePath. Run the plan script first."
+    Write-Error @"
+Terraform plan file not found:
+  $planFilePath
+
+Run the plan script first:
+  .\Scripts\build_vm_plan_v2.ps1 -VmName $VmName
+"@
     exit 1
 }
 
-# ===============================
-# Terraform init + workspace
-# ===============================
-Set-Location $tfDir
-terraform init -upgrade
+# ─────────────────────────────────────────────────────────────
+# Terraform init
+# ─────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
+Write-Host "  terraform init"                           -ForegroundColor Cyan
+Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
-Write-Host "Selecting Terraform workspace: $VmName"
-$workspaceName = $VmName.ToLower()
-$workspaces = terraform workspace list |
-    ForEach-Object { $_.Trim().TrimStart('*').Trim() }
+Push-Location $tfDir
+try {
+    terraform init -reconfigure
+    if ($LASTEXITCODE -ne 0) { throw "terraform init failed (exit $LASTEXITCODE)" }
 
-if ($workspaces -contains $workspaceName) {
-    terraform workspace select $workspaceName | Out-Null
-} else {
-    Write-Error "Terraform workspace '$workspaceName' not found. Run the plan script first."
-    exit 1
+    # ─────────────────────────────────────────────────────────
+    # Select workspace — must already exist from plan step
+    # ─────────────────────────────────────────────────────────
+    $workspaceName = $VmName.ToLower()
+    Write-Host "  Selecting workspace: $workspaceName"
+
+    $workspaces = terraform workspace list |
+        ForEach-Object { $_.Trim().TrimStart('*').Trim() }
+
+    if ($workspaces -contains $workspaceName) {
+        terraform workspace select $workspaceName | Out-Null
+    } else {
+        Write-Error @"
+Terraform workspace '$workspaceName' not found.
+
+The workspace is created during the plan step. Run:
+  .\Scripts\build_vm_plan_v2.ps1 -VmName $VmName
+"@
+        exit 1
+    }
+
+    # ─────────────────────────────────────────────────────────
+    # Terraform apply
+    # ─────────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
+    Write-Host "  terraform apply"                          -ForegroundColor Cyan
+    Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
+
+    terraform apply "$planFilePath"
+    if ($LASTEXITCODE -ne 0) { throw "terraform apply failed (exit $LASTEXITCODE)" }
+
+} finally {
+    Pop-Location
 }
 
-# ===============================
-# Terraform apply
-# ===============================
-Write-Host "Running terraform apply for $VmName..."
-terraform apply "$planFilePath"
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Terraform apply failed."
-    exit 1
-}
-
-Write-Host "Terraform apply completed for $VmName"
-
+Write-Host ""
+Write-Host "════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "  Apply complete!"                                    -ForegroundColor Green
+Write-Host "  VM: $VmName"                                       -ForegroundColor Green
+Write-Host "════════════════════════════════════════════════════" -ForegroundColor Green

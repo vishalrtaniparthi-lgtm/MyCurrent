@@ -1,142 +1,47 @@
-variable "vm_name" { type = string }
+# ─────────────────────────────────────────────────────────────
+# Nutanix connection
+# ─────────────────────────────────────────────────────────────
+variable "nutanix_endpoint" {
+  type        = string
+  description = "Hostname or IP of the Nutanix Prism Central endpoint."
+}
 
-variable "num_sockets" { 
-  type = number
-   default = 1
-    }
+# ─────────────────────────────────────────────────────────────
+# Infrastructure UUIDs
+# ─────────────────────────────────────────────────────────────
+variable "custom_image_uuid" {
+  type        = string
+  description = "UUID of the golden Windows image to clone from."
+}
 
-variable "num_vcpus_per_socket" { 
-  type = number
-   default = 2
-    }
+variable "paging_disk_uuid" {
+  type        = string
+  description = "UUID of the paging disk image to attach."
+}
 
-variable "memory_size_mib" { 
-  type = number
-   default = 4096
-    }
+variable "subnet_uuid" {
+  type        = string
+  description = "UUID of the Nutanix subnet to connect VMs to."
+}
 
-variable "nutanix_endpoint" { type = string }
+variable "cluster_uuid" {
+  type        = string
+  description = "UUID of the Nutanix cluster to deploy VMs on."
+}
 
-# variable "nutanix_username" { type = string }
+# ─────────────────────────────────────────────────────────────
+# Domain
+# ─────────────────────────────────────────────────────────────
+variable "domain_name" {
+  type        = string
+  description = "Active Directory domain to join (e.g. corp.example.com)."
+}
 
-# variable "nutanix_password" {
-#   type      = string
-#   sensitive = true
-# }
-
-variable "custom_image_uuid" { type = string }
-
-variable "subnet_uuid" { type = string }
-
-variable "cluster_uuid" { type = string }
-
-variable "paging_disk_uuid" { type = string }
-
-variable "domain_name" { type = string }
-
-# variable "domain_user" { type = string }
-
-# variable "domain_pass" {
-#   type      = string
-#   sensitive = true
-# }
-
-# variable "admin_password" {
-#   type      = string
-#   sensitive = true
-# }
-
-
-
-# variable "static_ip" {}
-# variable "gateway" {}
-# variable "dns1" {}
-# variable "dns2" {}
-
-##################################################################################################################
-
-# variable "first_run_script_uri" {
-#   type        = string
-#   description = "Public URL or internal file share path to the first boot PowerShell script"
-# }
-
-# variable "vm_config" {
-#   description = "VM configuration passed dynamically"
-#   type = object({
-#     vm_name              = string
-#     memory               = number
-#     num_sockets          = number
-#     num_vcpus_per_socket = number
-#     gateway              = string
-#     dns1                 = string
-#     dns2                 = string
-#   })
-# }
-
-#######################################################################################################################
-# variables.tf
-
-# variable "vm_config" {
-#   description = "Single VM configuration passed dynamically via -var"
-#   type = object({
-#     vm_name              = string
-#     memory               = number
-#     num_sockets          = number
-#     num_vcpus_per_socket = number
-#     gateway              = string
-#     dns1                 = string
-#     dns2                 = string
-#   })
-# }
-
-# variable "cluster_uuid" {
-#   type        = string
-#   description = "UUID of the Nutanix cluster"
-# }
-
-# variable "subnet_uuid" {
-#   type        = string
-#   description = "UUID of the subnet to attach the VM"
-# }
-
-# variable "image_uuid" {
-#   type        = string
-#   description = "UUID of the image to clone from"
-# }
-
-# variable "admin_password" {
-#   type        = string
-#   description = "Local admin password for the VM"
-#   sensitive   = true
-# }
-
-# variable "domain_name" {
-#   type        = string
-#   description = "Domain to join"
-# }
-
-# variable "domain_user" {
-#   type        = string
-#   description = "Domain join user"
-# }
-
-# variable "domain_pass" {
-#   type        = string
-#   description = "Domain join password"
-#   sensitive   = true
-# }
-
-# variable "static_ip" {
-#   type        = string
-#   description = "Static IP to assign to the VM"
-# }
-
-# variable "prefix" {
-#   type        = number
-#   description = "CIDR prefix for the static IP"
-# }
-
+# ─────────────────────────────────────────────────────────────
+# VM map — one entry per VM to provision
+# ─────────────────────────────────────────────────────────────
 variable "vm_map" {
+  description = "Map of VM names to their individual configuration. One entry = one VM."
   type = map(object({
     num_sockets          = number
     num_vcpus_per_socket = number
@@ -149,5 +54,29 @@ variable "vm_map" {
   }))
 }
 
+# ─────────────────────────────────────────────────────────────
+# Default sizing (used when not overridden per-VM in vm_map)
+# ─────────────────────────────────────────────────────────────
+variable "vm_name" {
+  type        = string
+  description = "Single VM name (used for workspace naming / legacy support)."
+  default     = ""
+}
 
+variable "num_sockets" {
+  type        = number
+  description = "Default number of CPU sockets."
+  default     = 1
+}
 
+variable "num_vcpus_per_socket" {
+  type        = number
+  description = "Default number of vCPUs per socket."
+  default     = 2
+}
+
+variable "memory_size_mib" {
+  type        = number
+  description = "Default memory in MiB."
+  default     = 4096
+}
