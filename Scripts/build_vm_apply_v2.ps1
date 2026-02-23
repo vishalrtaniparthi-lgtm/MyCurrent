@@ -11,6 +11,15 @@
         .\Scripts\build_vm_plan_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
         .\Scripts\build_vm_apply_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
 
+    Ansible modes:
+      Option A — Ansible installed locally on this machine (no extra params needed):
+        .\Scripts\build_vm_apply_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
+
+      Option B — Trigger Ansible remotely via SSH on a Linux control node:
+        .\Scripts\build_vm_apply_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01" `
+            -AnsibleHost "TCD-ANS-LNX-01" -AnsibleUser "ansibleadmin" `
+            -AnsibleRepoPath "/home/ansibleadmin/MyCurrent"
+
 .PARAMETER VmName
     Name of the VM. Must match what was used in build_vm_plan_v2.ps1.
 
@@ -18,14 +27,30 @@
     Cluster folder name under clusters\. E.g. "TCD-NTX-CLS-01".
 
 .PARAMETER SkipAnsible
-    Skip the Ansible post-boot step. Useful for debugging Terraform-only issues.
+    Skip the Ansible post-boot step entirely. Useful for debugging Terraform-only issues.
+
+.PARAMETER AnsibleHost
+    (Option B) Hostname or IP of the Linux Ansible control node (e.g. TCD-ANS-LNX-01).
+    When provided, the playbook is triggered via SSH instead of running locally.
+
+.PARAMETER AnsibleUser
+    (Option B) SSH username on the Ansible control node. Default: ansibleadmin.
+
+.PARAMETER AnsibleRepoPath
+    (Option B) Absolute path to the MyCurrent repo clone on the control node.
+    Default: /home/ansibleadmin/MyCurrent
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$VmName,
     [Parameter(Mandatory)] [string]$Cluster,
-    [switch]$SkipAnsible
+    [switch]$SkipAnsible,
+
+    # Option B parameters — leave blank to run Ansible locally (Option A)
+    [string]$AnsibleHost      = "",
+    [string]$AnsibleUser      = "ansibleadmin",
+    [string]$AnsibleRepoPath  = "/home/ansibleadmin/MyCurrent"
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +72,11 @@ Write-Host ""
 Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 Write-Host "  Cluster  : $Cluster"                     -ForegroundColor Cyan
 Write-Host "  VM Name  : $VmName"                      -ForegroundColor Cyan
+if ($AnsibleHost) {
+    Write-Host "  Ansible  : $AnsibleUser@$AnsibleHost (Option B - remote SSH)" -ForegroundColor Cyan
+} else {
+    Write-Host "  Ansible  : local (Option A)"          -ForegroundColor Cyan
+}
 Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
 if (-not (Test-Path $clusterDir)) {
@@ -117,7 +147,7 @@ Write-Host "  VM deployed: $VmName ($staticIP)" -ForegroundColor Green
 # Ansible post-boot configuration
 # ─────────────────────────────────────────────────────────────
 if ($SkipAnsible) {
-    Write-Host "  Skipping Ansible (--SkipAnsible specified)." -ForegroundColor Yellow
+    Write-Host "  Skipping Ansible (-SkipAnsible specified)." -ForegroundColor Yellow
 } else {
     Write-Host ""
     Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
@@ -144,7 +174,11 @@ if ($SkipAnsible) {
     }
 
     if (-not $winrmUp) {
-        Write-Warning "WinRM did not become available within ${maxWait}s. Run Ansible manually:`n  ansible-playbook ansible/postboot.yml -i $staticIP,"
+        Write-Warning "WinRM did not become available within ${maxWait}s."
+        Write-Host ""
+        Write-Host "  Run Ansible manually on TCD-ANS-LNX-01:" -ForegroundColor Yellow
+        Write-Host "    cd ~/MyCurrent && git pull" -ForegroundColor Yellow
+        Write-Host "    ansible-playbook ansible/postboot.yml -i `"$staticIP,`" -e `"target_vm=$staticIP vm_name=$VmName`"" -ForegroundColor Yellow
     } else {
         # Fetch credentials from CyberArk for Ansible
         Write-Host "  Fetching credentials for Ansible..." -ForegroundColor Cyan
@@ -157,23 +191,62 @@ if ($SkipAnsible) {
         Write-Host "  Running Ansible postboot playbook..."    -ForegroundColor Cyan
         Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
-        Push-Location $repoRoot
-        try {
-            ansible-playbook "$ansibleDir\postboot.yml" `
-                -i "$staticIP," `
-                -e "target_vm=$staticIP" `
-                -e "ansible_user=$adminUser" `
-                -e "ansible_password=$adminPass" `
-                -e "ansible_winrm_server_cert_validation=ignore" `
-                -e "vm_name=$VmName"
+        if ($AnsibleHost) {
+            # ─────────────────────────────────────────────────────────────
+            # OPTION B: SSH into the Linux control node and run playbook there
+            # Requires: SSH key-based auth from this machine to $AnsibleHost
+            # Setup:    ssh-keygen then ssh-copy-id ansibleadmin@TCD-ANS-LNX-01
+            # ─────────────────────────────────────────────────────────────
+            Write-Host "  Mode: Option B — Remote SSH to $AnsibleUser@$AnsibleHost" -ForegroundColor Cyan
+
+            # Escape single quotes in password for bash safety
+            $escapedPass = $adminPass -replace "'", "'\'''"
+
+            # Build the bash command to run on the remote Linux host
+            $remoteCmd = "cd $AnsibleRepoPath && git pull --quiet && " +
+                         "ansible-playbook ansible/postboot.yml " +
+                         "-i '$staticIP,' " +
+                         "-e 'target_vm=$staticIP' " +
+                         "-e 'ansible_user=$adminUser' " +
+                         "-e 'ansible_password=$escapedPass' " +
+                         "-e 'ansible_winrm_server_cert_validation=ignore' " +
+                         "-e 'vm_name=$VmName'"
+
+            ssh -o StrictHostKeyChecking=no -o BatchMode=yes `
+                "${AnsibleUser}@${AnsibleHost}" `
+                $remoteCmd
 
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Ansible postboot playbook failed. Check output above."
+                Write-Warning "Ansible postboot playbook failed on $AnsibleHost. Check output above."
             } else {
-                Write-Host "  Ansible postboot complete." -ForegroundColor Green
+                Write-Host "  Ansible postboot complete (via $AnsibleHost)." -ForegroundColor Green
             }
-        } finally {
-            Pop-Location
+
+        } else {
+            # ─────────────────────────────────────────────────────────────
+            # OPTION A: Run ansible-playbook locally on this Windows machine
+            # Requires: WSL or Cygwin with Ansible + pywinrm installed
+            # ─────────────────────────────────────────────────────────────
+            Write-Host "  Mode: Option A — Local ansible-playbook" -ForegroundColor Cyan
+
+            Push-Location $repoRoot
+            try {
+                ansible-playbook "$ansibleDir\postboot.yml" `
+                    -i "$staticIP," `
+                    -e "target_vm=$staticIP" `
+                    -e "ansible_user=$adminUser" `
+                    -e "ansible_password=$adminPass" `
+                    -e "ansible_winrm_server_cert_validation=ignore" `
+                    -e "vm_name=$VmName"
+
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Ansible postboot playbook failed. Check output above."
+                } else {
+                    Write-Host "  Ansible postboot complete." -ForegroundColor Green
+                }
+            } finally {
+                Pop-Location
+            }
         }
     }
 }
