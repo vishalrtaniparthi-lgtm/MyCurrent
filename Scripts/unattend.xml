@@ -56,7 +56,7 @@
           <Identifier>Ethernet</Identifier>
           <Ipv4Settings>
             <DhcpEnabled>false</DhcpEnabled>
-            <RouterDiscoveryEnabled>true</RouterDiscoveryEnabled>
+            <RouterDiscoveryEnabled>false</RouterDiscoveryEnabled>
             <Metric>30</Metric>
           </Ipv4Settings>
           <UnicastIpAddresses>
@@ -188,45 +188,68 @@
       <!-- First logon commands — executed in order -->
       <FirstLogonCommands>
 
-        <!-- Order 1: Enable WinRM using the built-in quickconfig -->
+        <!-- Order 1: Enable WinRM HTTP (port 5985) for initial Ansible bootstrap -->
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <Description>Enable WinRM</Description>
+          <Description>Enable WinRM HTTP quickconfig</Description>
           <RequiresUserInput>false</RequiresUserInput>
-          <CommandLine>cmd.exe /c winrm quickconfig -quiet</CommandLine>
+          <CommandLine>cmd.exe /c winrm quickconfig -quiet -force</CommandLine>
         </SynchronousCommand>
 
-        <!-- Order 2: Open WinRM port 5985 via firewall rule (named rule, not legacy netsh) -->
+        <!-- Order 2: Allow unencrypted WinRM temporarily for initial connection -->
         <SynchronousCommand wcm:action="add">
           <Order>2</Order>
-          <Description>Open WinRM port 5985</Description>
+          <Description>Allow WinRM unencrypted for bootstrap</Description>
           <RequiresUserInput>false</RequiresUserInput>
-          <CommandLine>cmd.exe /c netsh advfirewall firewall add rule name="WinRM Port 5985" dir=in action=allow protocol=TCP localport=5985</CommandLine>
+          <CommandLine>cmd.exe /c winrm set winrm/config/service @{AllowUnencrypted="true"}</CommandLine>
         </SynchronousCommand>
 
-        <!-- Order 3: Set account lockout threshold -->
+        <!-- Order 3: Allow Basic auth temporarily for bootstrap -->
         <SynchronousCommand wcm:action="add">
           <Order>3</Order>
+          <Description>Allow WinRM Basic auth for bootstrap</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>cmd.exe /c winrm set winrm/config/service/auth @{Basic="true"}</CommandLine>
+        </SynchronousCommand>
+
+        <!-- Order 4: Open WinRM HTTP port 5985 in firewall -->
+        <SynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Open WinRM HTTP port 5985 in firewall</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>cmd.exe /c netsh advfirewall firewall add rule name="WinRM HTTP 5985" dir=in action=allow protocol=TCP localport=5985</CommandLine>
+        </SynchronousCommand>
+
+        <!-- Order 5: Open WinRM HTTPS port 5986 in firewall -->
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Description>Open WinRM HTTPS port 5986 in firewall</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>cmd.exe /c netsh advfirewall firewall add rule name="WinRM HTTPS 5986" dir=in action=allow protocol=TCP localport=5986</CommandLine>
+        </SynchronousCommand>
+
+        <!-- Order 6: Set account lockout threshold -->
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order>
           <Description>Set account lockout policy to 3 attempts</Description>
           <RequiresUserInput>false</RequiresUserInput>
           <CommandLine>cmd.exe /c net accounts /lockoutthreshold:3</CommandLine>
         </SynchronousCommand>
 
-        <!-- Order 20: Register post-boot configuration scheduled task -->
-        <SynchronousCommand wcm:action="add">
-          <Order>20</Order>
-          <Description>Register PostBoot scheduled task</Description>
-          <RequiresUserInput>false</RequiresUserInput>
-          <CommandLine>cmd.exe /c schtasks /create /tn "PostBootSetup" /sc ONSTART /ru SYSTEM /rl HIGHEST /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\PostBoot.ps1" /f</CommandLine>
-        </SynchronousCommand>
-
-        <!-- Order 99: Log off Administrator after first-run commands complete -->
+        <!-- Order 99: Log off Administrator — Ansible will handle all post-boot tasks -->
         <SynchronousCommand wcm:action="add">
           <Order>99</Order>
-          <Description>Log off Administrator after build</Description>
+          <Description>Log off Administrator after first-run commands</Description>
           <RequiresUserInput>false</RequiresUserInput>
           <CommandLine>cmd.exe /c logoff</CommandLine>
         </SynchronousCommand>
+
+        <!--
+          NOTE: No PostBoot scheduled task registered here.
+          All post-boot configuration (paging disk, IPv6, services)
+          is handled by Ansible (ansible/roles/windows-postboot)
+          which also configures WinRM HTTPS (port 5986) on first connect.
+        -->
 
       </FirstLogonCommands>
 

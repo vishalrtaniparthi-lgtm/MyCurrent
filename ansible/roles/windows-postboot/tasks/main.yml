@@ -1,0 +1,162 @@
+---
+# ─────────────────────────────────────────────────────────────
+# Task 1: Configure WinRM over HTTPS with a self-signed cert
+# This secures all future Ansible communication with the VM.
+# Based on: https://www.presidio.com/technical-blog/automating-windows-with-ansible-a-secure-approach-using-https-and-certs/
+# ─────────────────────────────────────────────────────────────
+- name: Create self-signed certificate for WinRM HTTPS
+  win_shell: |
+    $cert = New-SelfSignedCertificate `
+      -DnsName $env:COMPUTERNAME `
+      -CertStoreLocation "cert:\LocalMachine\My" `
+      -KeyAlgorithm RSA `
+      -KeyLength 2048 `
+      -NotAfter (Get-Date).AddYears(5)
+    Write-Output $cert.Thumbprint
+  register: winrm_cert_thumbprint
+  changed_when: true
+
+- name: Create WinRM HTTPS listener
+  win_shell: |
+    $thumbprint = "{{ winrm_cert_thumbprint.stdout | trim }}"
+    $existing = Get-WSManInstance -ResourceURI winrm/config/Listener `
+      -SelectorSet @{Address="*"; Transport="HTTPS"} -ErrorAction SilentlyContinue
+    if (-not $existing) {
+      New-WSManInstance -ResourceURI winrm/config/Listener `
+        -SelectorSet @{Address="*"; Transport="HTTPS"} `
+        -ValueSet @{Hostname=$env:COMPUTERNAME; CertificateThumbprint=$thumbprint}
+      Write-Output "HTTPS listener created"
+    } else {
+      Write-Output "HTTPS listener already exists"
+    }
+  register: winrm_listener
+  changed_when: "'HTTPS listener created' in winrm_listener.stdout"
+
+- name: Open WinRM HTTPS port 5986 in firewall
+  win_firewall_rule:
+    name: "WinRM HTTPS 5986"
+    localport: 5986
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+    enabled: yes
+
+- name: Set WinRM service to start automatically
+  win_service:
+    name: WinRM
+    start_mode: auto
+    state: started
+
+# ─────────────────────────────────────────────────────────────
+# Task 2: Initialize and format paging disk (Disk 1 → Q:)
+# ─────────────────────────────────────────────────────────────
+- name: Check if Q drive already exists
+  win_shell: Test-Path "Q:\"
+  register: q_drive_exists
+  changed_when: false
+  failed_when: false
+
+- name: Initialize paging disk (Disk 1) if RAW
+  win_shell: |
+    $disk = Get-Disk -Number {{ paging_disk_number }} -ErrorAction Stop
+    if ($disk.PartitionStyle -eq 'RAW') {
+      Initialize-Disk -Number {{ paging_disk_number }} -PartitionStyle GPT -ErrorAction Stop
+      Start-Sleep -Seconds 3
+      Write-Output "Initialized"
+    } else {
+      Write-Output "Already initialized: $($disk.PartitionStyle)"
+    }
+  register: disk_init
+  changed_when: "'Initialized' in disk_init.stdout"
+  when: q_drive_exists.stdout | trim == 'False'
+
+- name: Create partition and format Q drive
+  win_shell: |
+    $partition = New-Partition -DiskNumber {{ paging_disk_number }} `
+      -UseMaximumSize -DriveLetter {{ paging_drive_letter }} -ErrorAction Stop
+    Format-Volume -DriveLetter {{ paging_drive_letter }} `
+      -FileSystem NTFS `
+      -NewFileSystemLabel "{{ paging_disk_label }}" `
+      -AllocationUnitSize {{ paging_disk_alloc_unit }} `
+      -Confirm:$false -ErrorAction Stop
+    Write-Output "Formatted"
+  register: disk_format
+  changed_when: "'Formatted' in disk_format.stdout"
+  when: q_drive_exists.stdout | trim == 'False'
+
+# ─────────────────────────────────────────────────────────────
+# Task 3: Move pagefile to Q drive
+# ─────────────────────────────────────────────────────────────
+- name: Check if pagefile is already on Q drive
+  win_shell: |
+    $pf = Get-WmiObject Win32_PageFileSetting | Where-Object { $_.Name -like "Q:*" }
+    if ($pf) { Write-Output "true" } else { Write-Output "false" }
+  register: pagefile_on_q
+  changed_when: false
+
+- name: Move pagefile to Q drive
+  win_shell: |
+    $cs = Get-WmiObject Win32_ComputerSystem
+    $cs.AutomaticManagedPagefile = $false
+    $cs.Put() | Out-Null
+    Get-WmiObject Win32_PageFileSetting | ForEach-Object { $_.Delete() }
+    Set-WmiInstance -Class Win32_PageFileSetting `
+      -Arguments @{ Name = "Q:\pagefile.sys"; InitialSize = 0; MaximumSize = 0 } | Out-Null
+    Write-Output "Pagefile moved to Q"
+  register: pagefile_move
+  changed_when: true
+  when: pagefile_on_q.stdout | trim == 'false'
+
+# ─────────────────────────────────────────────────────────────
+# Task 4: Disable IPv6
+# ─────────────────────────────────────────────────────────────
+- name: Disable IPv6 via registry
+  win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters
+    name: DisabledComponents
+    data: 0xFF
+    type: dword
+    state: present
+
+- name: Disable IPv6 binding on all adapters
+  win_shell: |
+    Get-NetAdapter | ForEach-Object {
+      Disable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+    }
+    Write-Output "IPv6 disabled on all adapters"
+  changed_when: true
+
+# ─────────────────────────────────────────────────────────────
+# Task 5: Verify required services are running
+# ─────────────────────────────────────────────────────────────
+- name: Check NCPA Agent service
+  win_service:
+    name: ncpad
+  register: ncpa_status
+  failed_when: false
+
+- name: Warn if NCPA Agent is not running
+  debug:
+    msg: "WARNING: NCPA Agent (ncpad) is NOT running. Manual intervention required."
+  when: ncpa_status.state is not defined or ncpa_status.state != 'running'
+
+- name: Check CrowdStrike Falcon service
+  win_service:
+    name: CSFalconService
+  register: cs_status
+  failed_when: false
+
+- name: Warn if CrowdStrike is not running
+  debug:
+    msg: "WARNING: CrowdStrike Falcon (CSFalconService) is NOT running. Manual intervention required."
+  when: cs_status.state is not defined or cs_status.state != 'running'
+
+# ─────────────────────────────────────────────────────────────
+# Task 6: Reboot to activate pagefile change
+# ─────────────────────────────────────────────────────────────
+- name: Reboot to activate pagefile on Q drive
+  win_reboot:
+    reboot_timeout: 300
+    msg: "Rebooting to activate pagefile on Q drive"
+  when: pagefile_move.changed

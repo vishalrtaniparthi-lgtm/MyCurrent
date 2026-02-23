@@ -1,0 +1,9 @@
+---
+# Paging disk number (Nutanix attaches it as Disk 1)
+paging_disk_number: 1
+paging_drive_letter: Q
+paging_disk_label: DATA
+paging_disk_alloc_unit: 65536
+
+# Account lockout threshold
+lockout_threshold: 3

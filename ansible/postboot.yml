@@ -1,0 +1,23 @@
+---
+# ─────────────────────────────────────────────────────────────
+# postboot.yml — Windows VM post-boot configuration
+#
+# Called automatically by build_vm_apply_v2.ps1 after terraform apply.
+# Can also be run manually:
+#   ansible-playbook ansible/postboot.yml \
+#     -i "10.12.110.50," \
+#     -e "target_vm=10.12.110.50 ansible_user=Administrator ansible_password=SECRET vm_name=TCD-VM-01"
+# ─────────────────────────────────────────────────────────────
+- name: Windows VM Post-Boot Configuration
+  hosts: "{{ target_vm }}"
+  gather_facts: yes
+
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_winrm_scheme: https
+    ansible_port: 5986
+    ansible_winrm_server_cert_validation: ignore   # self-signed cert on new VMs
+
+  roles:
+    - windows-postboot

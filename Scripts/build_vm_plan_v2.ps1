@@ -3,49 +3,41 @@
     Step 1 of 2 — Fetch a free IP from phpIPAM and run terraform plan for a new VM.
 
 .DESCRIPTION
-    Validates the Terraform repo root, fetches an available IP from phpIPAM,
-    writes a per-VM tfvars JSON file, selects (or creates) a Terraform workspace,
-    and runs terraform plan, saving the plan output for use by build_vm_apply_v2.ps1.
+    Reads the target cluster config, fetches a free IP from phpIPAM using the
+    cluster-specific subnet, writes a per-VM tfvars JSON, selects (or creates)
+    a Terraform workspace, and runs terraform plan.
 
     Run order:
-        .\Scripts\build_vm_plan_v2.ps1 -VmName "MY-VM-01"
-        .\Scripts\build_vm_apply_v2.ps1 -VmName "MY-VM-01"
+        .\Scripts\build_vm_plan_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
+        .\Scripts\build_vm_apply_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
 
 .PARAMETER VmName
-    Name of the VM to provision. Must be 15 characters or fewer (NetBIOS limit).
+    Name of the VM. Max 15 characters (NetBIOS limit).
+
+.PARAMETER Cluster
+    Cluster folder name under clusters\. E.g. "TCD-NTX-CLS-01".
 
 .PARAMETER Cpu
-    Number of vCPUs per socket. Default: 4.
+    vCPUs per socket. Default: 4.
 
 .PARAMETER Sockets
-    Number of CPU sockets. Default: 1.
+    CPU sockets. Default: 1.
 
 .PARAMETER Memory
     Memory in MiB. Default: 8192.
 
-.PARAMETER Prefix
-    Network prefix length (CIDR). Default: 24.
-
-.PARAMETER Gateway
-    Default gateway IP. Default: 10.10.1.1.
-
-.PARAMETER Dns1
-    Primary DNS server. Default: 10.10.11.51.
-
-.PARAMETER Dns2
-    Secondary DNS server. Default: 10.10.12.52.
+.EXAMPLE
+    .\Scripts\build_vm_plan_v2.ps1 -VmName "TCD-VM-01" -Cluster "TCD-NTX-CLS-01"
+    .\Scripts\build_vm_plan_v2.ps1 -VmName "PCH-VM-01" -Cluster "TLO-NTX-CLS-01"
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$VmName,
+    [Parameter(Mandatory)] [string]$Cluster,
     [ValidateRange(1,64)]  [int]$Cpu     = 4,
     [ValidateRange(1,8)]   [int]$Sockets = 1,
-    [ValidateRange(512, 524288)] [int]$Memory  = 8192,
-    [ValidateRange(8,30)]  [int]$Prefix  = 24,
-    [string]$Gateway = "10.10.1.1",
-    [string]$Dns1    = "10.10.11.51",
-    [string]$Dns2    = "10.10.12.52"
+    [ValidateRange(512,524288)] [int]$Memory = 8192
 )
 
 Set-StrictMode -Version Latest
@@ -60,44 +52,58 @@ if ($VmName.Length -gt 15) {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Guardrail: confirm we can find the Terraform root
+# Resolve paths
 # ─────────────────────────────────────────────────────────────
-function Assert-TerraformRoot {
-    param([string]$TerraformRoot)
-    foreach ($file in @("main.tf", "variables.tf")) {
-        if (-not (Test-Path (Join-Path $TerraformRoot $file))) {
-            Write-Error @"
-Terraform root validation failed.
+$repoRoot      = Resolve-Path (Join-Path $PSScriptRoot "..")
+$clusterDir    = Join-Path $repoRoot "clusters\$Cluster"
+$clusterTfvars = Join-Path $clusterDir "cluster.tfvars"
+$tfvarsDir     = Join-Path $clusterDir "tfvars"
+$tfplanDir     = Join-Path $clusterDir "tfplan"
+$vmTfvarsPath  = Join-Path $tfvarsDir "$VmName.tfvars.json"
+$planFilePath  = Join-Path $tfplanDir "tfplan_output_$VmName.tfplan"
 
-Expected '$file' in:
-  $TerraformRoot
+Write-Host ""
+Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
+Write-Host "  Cluster  : $Cluster"                     -ForegroundColor Cyan
+Write-Host "  VM Name  : $VmName"                      -ForegroundColor Cyan
+Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
-Ensure this script lives inside a 'Scripts' subfolder of the Terraform repo root.
-"@
-            exit 1
-        }
+if (-not (Test-Path $clusterTfvars)) {
+    Write-Error "Cluster config not found: $clusterTfvars`nCreate it under clusters\$Cluster\cluster.tfvars"
+    exit 1
+}
+
+# Create runtime directories
+foreach ($dir in @($tfvarsDir, $tfplanDir)) {
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Write-Host "  Created: $dir" -ForegroundColor DarkGray
     }
 }
 
 # ─────────────────────────────────────────────────────────────
-# Resolve paths
+# Parse cluster.tfvars for subnet info needed by phpIPAM
 # ─────────────────────────────────────────────────────────────
-$tfDir        = Resolve-Path (Join-Path $PSScriptRoot "..")
-$tfvarsDir    = Join-Path $tfDir "tfvars"
-$stateDir     = Join-Path $tfDir "StateFiles"
-$tfplanDir    = Join-Path $tfDir "tfplan"
-$vmTfvarsPath = Join-Path $tfvarsDir "$VmName.tfvars.json"
-$planFilePath = Join-Path $tfplanDir "tfplan_output_$VmName.tfplan"
-
-Assert-TerraformRoot -TerraformRoot $tfDir
-
-# Create output directories if they don't exist
-foreach ($dir in @($tfvarsDir, $stateDir, $tfplanDir)) {
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+function Get-TfVarValue([string]$FilePath, [string]$VarName) {
+    $content = Get-Content $FilePath -Raw
+    if ($content -match "(?m)^\s*$VarName\s*=\s*`"?([^`"\r\n]+)`"?") {
+        return $Matches[1].Trim().Trim('"')
+    }
+    throw "Could not find '$VarName' in $FilePath"
 }
 
+$subnetCidr   = Get-TfVarValue $clusterTfvars "subnet_cidr"
+$ipamSubnetId = [int](Get-TfVarValue $clusterTfvars "ipam_subnet_id")
+$gateway      = Get-TfVarValue $clusterTfvars "gateway"
+$dns1         = Get-TfVarValue $clusterTfvars "dns1"
+$dns2         = Get-TfVarValue $clusterTfvars "dns2"
+$prefix       = [int](Get-TfVarValue $clusterTfvars "prefix")
+
+Write-Host "  Subnet   : $subnetCidr (ID: $ipamSubnetId)" -ForegroundColor DarkGray
+Write-Host "  Gateway  : $gateway"                         -ForegroundColor DarkGray
+
 # ─────────────────────────────────────────────────────────────
-# Fetch a free static IP from phpIPAM
+# Fetch free IP from phpIPAM using cluster-specific subnet
 # ─────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
@@ -110,11 +116,11 @@ if (-not (Test-Path $fetchScript)) {
     exit 1
 }
 
-$freeIpResult = & $fetchScript
+$freeIpResult = & $fetchScript -Subnet $subnetCidr -SubnetId $ipamSubnetId
 $staticIP     = ($freeIpResult | ConvertFrom-Json).ip
 
 if ([string]::IsNullOrWhiteSpace($staticIP)) {
-    Write-Error "No IP returned from fetchfreeip.ps1. Aborting."
+    Write-Error "No IP returned from fetchfreeip.ps1 for subnet $subnetCidr"
     exit 1
 }
 
@@ -135,33 +141,40 @@ $vmConfig = @{
             num_vcpus_per_socket = $Cpu
             memory_size_mib      = $Memory
             static_ip            = $staticIP
-            prefix               = $Prefix
-            gateway              = $Gateway
-            dns1                 = $Dns1
-            dns2                 = $Dns2
+            prefix               = $prefix
+            gateway              = $gateway
+            dns1                 = $dns1
+            dns2                 = $dns2
         }
     }
 }
 
 $vmConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vmTfvarsPath -Encoding UTF8
-Write-Host "  Saved: $vmTfvarsPath"
+Write-Host "  Saved: $vmTfvarsPath" -ForegroundColor Green
 
 # ─────────────────────────────────────────────────────────────
-# Terraform init (no -upgrade on routine runs)
+# Terraform init + workspace + plan
 # ─────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 Write-Host "  terraform init"                           -ForegroundColor Cyan
 Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
-Push-Location $tfDir
+Push-Location $clusterDir
 try {
+    # Verify Azure login for backend state
+    $azCtx = az account show 2>$null | ConvertFrom-Json
+    if (-not $azCtx) {
+        Write-Host "  Logging into Azure for state backend..." -ForegroundColor Yellow
+        az login --output none
+        $azCtx = az account show | ConvertFrom-Json
+    }
+    Write-Host "  Azure subscription: $($azCtx.name)" -ForegroundColor DarkGray
+
     terraform init -reconfigure
     if ($LASTEXITCODE -ne 0) { throw "terraform init failed (exit $LASTEXITCODE)" }
 
-    # ─────────────────────────────────────────────────────────
-    # Terraform workspace
-    # ─────────────────────────────────────────────────────────
+    # Workspace scoped per VM name
     $workspaceName = $VmName.ToLower()
     Write-Host "  Selecting workspace: $workspaceName"
 
@@ -174,15 +187,16 @@ try {
         terraform workspace new $workspaceName | Out-Null
     }
 
-    # ─────────────────────────────────────────────────────────
-    # Terraform plan
-    # ─────────────────────────────────────────────────────────
     Write-Host ""
     Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
     Write-Host "  terraform plan"                           -ForegroundColor Cyan
     Write-Host "──────────────────────────────────────────" -ForegroundColor Cyan
 
-    terraform plan -var-file="$vmTfvarsPath" -out="$planFilePath"
+    terraform plan `
+        -var-file="cluster.tfvars" `
+        -var-file="$vmTfvarsPath" `
+        -out="$planFilePath"
+
     if ($LASTEXITCODE -ne 0) { throw "terraform plan failed (exit $LASTEXITCODE)" }
 
 } finally {
@@ -191,10 +205,11 @@ try {
 
 Write-Host ""
 Write-Host "════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  Plan complete. Review the output above."           -ForegroundColor Green
+Write-Host "  Plan complete!"                                     -ForegroundColor Green
+Write-Host "  Cluster  : $Cluster"                               -ForegroundColor Green
 Write-Host "  VM       : $VmName"                                -ForegroundColor Green
 Write-Host "  IP       : $staticIP"                              -ForegroundColor Green
-Write-Host "  Plan file: $planFilePath"                          -ForegroundColor Green
 Write-Host ""
-Write-Host "  When ready:  .\Scripts\build_vm_apply_v2.ps1 -VmName $VmName" -ForegroundColor Green
+Write-Host "  When ready:" -ForegroundColor Green
+Write-Host "  .\Scripts\build_vm_apply_v2.ps1 -VmName $VmName -Cluster $Cluster" -ForegroundColor Green
 Write-Host "════════════════════════════════════════════════════" -ForegroundColor Green
