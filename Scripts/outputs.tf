@@ -1,32 +1,39 @@
-# ─────────────────────────────────────────────────────────────
-# VM names
-# ─────────────────────────────────────────────────────────────
-output "vm_names" {
-  description = "Names of all provisioned VMs."
-  value       = [for name in keys(nutanix_virtual_machine.windows_vm) : name]
+
+output "vm_name" {
+  value       = [ for name in keys(nutanix_virtual_machine.windows_vm) : name]
+  description = "VM name"
 }
 
-# ─────────────────────────────────────────────────────────────
-# VM UUIDs
-# ─────────────────────────────────────────────────────────────
-output "vm_uuids" {
-  description = "Map of VM name to Nutanix VM UUID."
+output "vm_uuid" {
   value       = { for name, vm in nutanix_virtual_machine.windows_vm : name => vm.id }
+  description = "VM UUID"
 }
 
-# ─────────────────────────────────────────────────────────────
-# Static IPs (from vm_map input)
-# ─────────────────────────────────────────────────────────────
-output "static_ips" {
-  description = "Map of VM name to assigned static IP address."
-  value       = { for name, cfg in var.vm_map : name => cfg.static_ip }
-}
+# output "debug_static_ip" {
+#   value = local.static_ip
+# }
 
-# ─────────────────────────────────────────────────────────────
-# Sysprep configs — marked sensitive (contains rendered passwords)
-# ─────────────────────────────────────────────────────────────
+# output "static_ip_from_script" {
+#   value = local.static_ip
+# }
+
+# output "ip_address" {
+#   value = nutanix_virtual_machine.virtual_machine_1.nic_list_status[0].ip_endpoint_list[0].ip
+# }
+
 output "rendered_vm_configs" {
-  description = "Rendered guest customization Sysprep configs per VM (sensitive — base64-encoded unattend.xml)."
-  value       = { for name in keys(nutanix_virtual_machine.windows_vm) : name => "base64-encoded unattend.xml (sensitive)" }
-  sensitive   = true
+description = "Rendered guest customization Sysprep per VM (sensitive)"
+value = {
+for name in keys(nutanix_virtual_machine.windows_vm) :
+name => "Rendered via templatefile - base64encoded unattend.xml"
+}
+sensitive = true
+}
+
+output "static_ips" {
+  description = "Static IPs assigned to each VM"
+  value = {
+    for name, cfg in var.vm_map :
+    name => cfg.static_ip
+  }
 }
